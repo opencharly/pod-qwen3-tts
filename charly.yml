@@ -1,0 +1,77 @@
+qwen3-tts:
+    candy:
+        description: |
+            Qwen3-TTS speech service — the OpenAI-compatible speech routes Open WebUI's
+            `openai` TTS engine calls (POST /v1/audio/speech, GET /v1/audio/voices), served
+            over the upstream `qwen-tts` python API by a charly-owned FastAPI shim.
+            Installs a pixi environment (torch cu130 + the qwen-tts package), copies the
+            shim to ${HOME}/.local/bin/qwen3-tts-server.py (mode 0755) and runs it as a
+            supervised service on port 8000. The checkpoint downloads into the `models`
+            volume on the first synthesis request and loads lazily, so the service is up
+            in seconds and ready after one download. Observable: the running `qwen3-tts`
+            service, the published port, a 200 from /health, the preset voice list, and
+            real WAV bytes from a POST to /v1/audio/speech.
+        require:
+            - '@github.com/opencharly/layer-python:v2026.293.1922'
+            - '@github.com/opencharly/layer-supervisord:v2026.271.1817'
+        # torch/triton JIT-compile kernels at synthesis time and need a C compiler in the
+        # image; a bare Fedora base fails synthesis with "Failed to find C compiler".
+        package:
+            - gcc
+            - gcc-c++
+        env:
+            QWEN3_TTS_MODEL: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            QWEN3_TTS_PORT: "8000"
+            QWEN3_TTS_VOICE: "vivian"
+            QWEN3_TTS_DEVICE: "cuda:0"
+        # The consumer side of this contract is pod-openwebui's env_accept:
+        # QWEN3_TTS_HOST is the BASE URL (ending in /v1), and the served model id travels
+        # with it because Open WebUI forces a `model` into every speech request.
+        env_provide:
+            QWEN3_TTS_HOST: "http://{{.ContainerName}}:8000/v1"
+            QWEN3_TTS_SERVED_MODEL: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            QWEN3_TTS_VOICE: "vivian"
+        port:
+            - 8000
+        volume:
+            - name: models
+              path: "~/.cache/huggingface"
+        service:
+            - name: qwen3-tts
+              exec: "%(ENV_HOME)s/.local/bin/qwen3-tts-server.py"
+              restart: always
+              enable: true
+        plan:
+            - run: create the model cache directory in the user's home
+              mkdir: "${HOME}/.cache/huggingface"
+              run_as: "${USER}"
+            - run: create the user binary directory
+              mkdir: "${HOME}/.local/bin"
+              run_as: "${USER}"
+            - run: install the charly-owned speech server
+              copy: qwen3-tts-server.py
+              to: "${HOME}/.local/bin/qwen3-tts-server.py"
+              mode: "0755"
+              run_as: "${USER}"
+            - check: the speech server script is present and executable
+              file:
+                file: ${HOME}/.local/bin/qwen3-tts-server.py
+                exists: true
+                mode: "0755"
+            - check: the pixi environment provides torch and soundfile for the server
+              exit_status: 0
+              command: python3 -c 'import torch, soundfile, fastapi, uvicorn; print("env-ok", torch.__version__)'
+            - check: the qwen-tts package the server imports resolves in the pixi environment
+              exit_status: 0
+              command: python3 -c 'import qwen_tts; print("qwen-tts-ok")'
+
+# ---------------------------------------------------------------------------
+# Routing-only skill node: the prose lives at
+# `.agents/skills/qwen3-tts/SKILL.md`, never inline (an inline body that
+# disagrees with the file is a hard error in the marketplace generator).
+# ---------------------------------------------------------------------------
+qwen3-tts-skill:
+    skill:
+        name: qwen3-tts
+        family: qwen3-tts
+        owner: qwen3-tts

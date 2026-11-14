@@ -1,0 +1,16 @@
+[workspace]
+name = "qwen3-tts"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.12.*"
+pip = "*"
+
+[pypi-dependencies]
+# Torch from the CUDA 13 index, the same pin the org's python-ml layer uses.
+torch = { version = ">=2.10.0", index = "https://download.pytorch.org/whl/cu130" }
+qwen-tts = "==0.1.1"
+fastapi = "*"
+uvicorn = "*"
+soundfile = "*"
