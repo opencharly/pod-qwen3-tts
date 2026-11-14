@@ -62,6 +62,13 @@ Build on **`fedora`**, not `nvidia`: the `nvidia` base's `layer-cuda` pin predat
 `cuda-cccl-devel` fix (opencharly/distro-fedora#110), and torch's cu130 wheels plus CDI at runtime
 make a separate CUDA layer unnecessary.
 
+## Pin handles
+
+The upstream `QwenLM/Qwen3-TTS` repo publishes **no releases and no tags**, so this candy pins the
+two handles that DO exist: the PyPI distribution (`qwen-tts==0.1.1` in `pixi.toml`) and the
+checkpoint repo id (`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`, overridable via `QWEN3_TTS_MODEL`).
+Torch is pinned through the pytorch cu130 index at the same floor the org's `python-ml` layer uses.
+
 ## Verification
 
 ```bash
