@@ -304,6 +304,29 @@ def _render(text, voice, language, format_name, instruct=None):
     return encode_audio(np.asarray(wavs[0]), sample_rate, format_name)
 
 
+def voice_validation(state, voice):
+    """Return the 400 response for a voice the loaded checkpoint does not serve.
+
+    Pure over a /health state snapshot, so the contract is testable without a
+    checkpoint: validation only applies once the checkpoint's OWN speaker list is
+    known (before that the preset list is the best information available).
+    """
+    if not (state.get("loaded") and state.get("voices_source") == "model" and isinstance(voice, str)):
+        return None
+    served = state.get("voices") or []
+    if voice.lower() in {name.lower() for name in served}:
+        return None
+    return _error(
+        400,
+        "invalid_request_error",
+        "unsupported_voice",
+        "voice %r is not a speaker of %r; supported: %s"
+        % (voice, MODEL_ID, ", ".join(served)),
+        param="voice",
+        supported_voices=list(served),
+    )
+
+
 def _error(status_code, error_type, code, message, param=None, **extra):
     body = {"error": {"message": message, "type": error_type, "code": code}}
     if param is not None:
@@ -388,17 +411,9 @@ async def speech(request: Request):
     instruct = body.get("instruct") or INSTRUCT
 
     state = _snapshot()
-    if state["loaded"] and state["voices_source"] == "model" and isinstance(voice, str):
-        if voice.lower() not in {name.lower() for name in state["voices"]}:
-            return _error(
-                400,
-                "invalid_request_error",
-                "unsupported_voice",
-                "voice %r is not a speaker of %r; supported: %s"
-                % (voice, MODEL_ID, ", ".join(state["voices"])),
-                param="voice",
-                supported_voices=list(state["voices"]),
-            )
+    refusal = voice_validation(state, voice)
+    if refusal is not None:
+        return refusal
 
     print(
         "qwen3-tts: synth voice=%s format=%s chars=%d" % (voice, format_name, len(text)),
