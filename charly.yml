@@ -6,11 +6,16 @@ qwen3-tts:
             over the upstream `qwen-tts` python API by a charly-owned FastAPI shim.
             Installs a pixi environment (torch cu130 + the qwen-tts package), copies the
             shim to ${HOME}/.local/bin/qwen3-tts-server.py (mode 0755) and runs it as a
-            supervised service on port 8000. The checkpoint downloads into the `models`
-            volume on the first synthesis request and loads lazily, so the service is up
-            in seconds and ready after one download. Observable: the running `qwen3-tts`
-            service, the published port, a 200 from /health, the preset voice list, and
-            real WAV bytes from a POST to /v1/audio/speech.
+            supervised service on port 8000. The checkpoint loads in a BACKGROUND thread at
+            service start, so uvicorn answers /v1/models in milliseconds while the model is
+            still warming; /health is the readiness signal (503 with a machine-readable
+            reason until the model serves, 200 after), a failed load stays retriable instead
+            of wedging the process, and every request is validated before anything loads
+            (a foreign model id or an unsupported response_format is a 4xx naming what this
+            server does serve). Observable: the running `qwen3-tts` service, the published
+            port, a 503 from /health while warming and a 200 once it serves, the
+            checkpoint's own speaker list, and real audio bytes (wav, mp3, flac or pcm) from
+            a POST to /v1/audio/speech.
         require:
             - '@github.com/opencharly/layer-python:v2026.293.1922'
             - '@github.com/opencharly/layer-supervisord:v2026.271.1817'
@@ -70,6 +75,227 @@ qwen3-tts:
             - check: the qwen-tts package the server imports resolves in the pixi environment
               exit_status: 0
               command: python3 -c 'import qwen_tts; print("qwen-tts-ok")'
+            # The two checks below pin the honesty contract of the shim itself, on a
+            # container with no checkpoint and no GPU: the readiness state machine, the
+            # request validation that must happen BEFORE a load, and the encoder map are
+            # all answerable without loading a model. The first starts the server with an
+            # unloadable checkpoint and offline, so every load attempt fails fast; the
+            # second imports the installed module and asserts the parts that need no
+            # request at all.
+            - check: the server keeps its OpenAI surface up while the checkpoint is unloadable and refuses what it cannot serve
+              exit_status: 0
+              command: |
+                python3 - <<'PYEOF'
+                import json, os, subprocess, sys, tempfile, threading, time
+                import urllib.error
+                import urllib.request
+
+                port = 18001
+                base = "http://127.0.0.1:%d" % port
+                model = "Qwen/Qwen3-TTS-12Hz-0.6B-AbsentFromThisImage"
+                server = os.path.join(os.path.expanduser("~"), ".local", "bin", "qwen3-tts-server.py")
+                failures = []
+
+                def check(name, condition, detail=""):
+                    if condition:
+                        print("PASS " + name)
+                    else:
+                        print("FAIL " + name + " :: " + str(detail))
+                        failures.append(name)
+
+                def request(path, body=None, timeout=180):
+                    data = None
+                    headers = {}
+                    if body is not None:
+                        data = json.dumps(body).encode()
+                        headers["Content-Type"] = "application/json"
+                    req = urllib.request.Request(base + path, data=data, headers=headers)
+                    try:
+                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                            return resp.status, resp.read(), resp.headers.get("Content-Type", "")
+                    except urllib.error.HTTPError as exc:
+                        return exc.code, exc.read(), exc.headers.get("Content-Type", "")
+
+                def as_json(raw):
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        return {}
+
+                scratch = tempfile.mkdtemp(prefix="qwen3-tts-check-")
+                log_path = os.path.join(scratch, "server.log")
+                env = dict(os.environ)
+                env.update({
+                    "QWEN3_TTS_PORT": str(port),
+                    "QWEN3_TTS_MODEL": model,
+                    "QWEN3_TTS_DEVICE": "cpu",
+                    "HF_HUB_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_TELEMETRY": "1",
+                    "HF_HUB_CACHE": os.path.join(scratch, "hub"),
+                    "PYTHONUNBUFFERED": "1",
+                })
+                log = open(log_path, "w+b")
+                proc = subprocess.Popen(
+                    [sys.executable, server],
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                print("server pid %d" % proc.pid)
+                try:
+                    # Readiness probe: the socket answering /v1/models is the condition,
+                    # bounded so a server that never listens fails the step instead of
+                    # hanging it.
+                    deadline = time.monotonic() + 120
+                    status = None
+                    payload = b""
+                    while time.monotonic() < deadline and proc.poll() is None:
+                        try:
+                            status, payload, _ = request("/v1/models", timeout=5)
+                            if status == 200:
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+                    served = as_json(payload)
+                    check("/v1/models answers 200 while the checkpoint is still warming", status == 200, status)
+                    check("/v1/models names the served checkpoint", served.get("data", [{}])[0].get("id") == model, served)
+
+                    # SINGLE-FLIGHT, proven while the startup preload is genuinely in
+                    # flight: import torch takes seconds, and these probes land within
+                    # milliseconds of the socket opening. A burst of concurrent requests
+                    # must all WAIT for that one attempt instead of starting one each, and
+                    # must answer 5xx when it fails.
+                    answers = []
+
+                    def fire():
+                        try:
+                            answers.append(request("/v1/audio/speech", {"input": "concurrent", "response_format": "wav"}, timeout=300)[0])
+                        except Exception as exc:
+                            answers.append(repr(exc)[:100])
+
+                    threads = [threading.Thread(target=fire) for _ in range(6)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join()
+                    burst_health = as_json(request("/health", timeout=60)[1])
+                    check("a concurrent burst during warming starts exactly ONE load attempt", burst_health.get("load_attempts", 0) == 1, burst_health)
+                    check("every request in that burst answered 5xx", len(answers) == 6 and all(isinstance(code, int) and code >= 500 for code in answers), answers)
+
+                    health_status, health_raw, _ = request("/health", timeout=60)
+                    health = as_json(health_raw)
+                    check("/health is 503, never 200, while no model is loaded", health_status == 503, health_status)
+                    check("/health speaks the state machine's own word", health.get("status") in ("loading", "error"), health)
+                    check("/health reports loaded=false with a machine-readable reason", health.get("loaded") is False and bool(health.get("detail")), health)
+
+                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "response_format": "opus"})
+                    body = as_json(raw)
+                    check("an unsupported response_format is rejected with 4xx", 400 <= status < 500, status)
+                    check("that rejection names the supported formats", body.get("error", {}).get("code") == "unsupported_response_format" and set(body.get("supported_formats") or []) >= {"wav", "mp3"}, body)
+
+                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "model": "gpt-4o-mini-tts"})
+                    body = as_json(raw)
+                    check("a foreign model id is rejected with 4xx", 400 <= status < 500, status)
+                    check("that rejection names the served checkpoint", body.get("error", {}).get("code") == "model_not_served" and body.get("served_model") == model, body)
+
+                    # Wait for the load to settle (bounded), so the retry measurement is
+                    # not racing it: a request that arrives WHILE a load runs is a waiter,
+                    # and a waiter answers that attempt's failure.
+                    settle = {}
+                    deadline = time.monotonic() + 300
+                    while time.monotonic() < deadline:
+                        settle = as_json(request("/health", timeout=60)[1])
+                        if settle.get("status") == "error":
+                            break
+                        time.sleep(0.2)
+                    check("/health settles on the failed load and keeps its detail", settle.get("status") == "error" and bool(settle.get("detail")), settle)
+                    before = settle.get("load_attempts", 0)
+                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "response_format": "wav"}, timeout=300)
+                    body = as_json(raw)
+                    check("a request with no loadable checkpoint answers 5xx, never 200", status >= 500, status)
+                    check("that 5xx names the load failure", body.get("error", {}).get("code") == "model_not_loaded" and bool(body.get("detail")), body)
+                    after_first = as_json(request("/health", timeout=60)[1])
+                    check("the failed load is retried by the NEXT request instead of wedging the process", after_first.get("load_attempts", 0) == before + 1, (before, after_first))
+                finally:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=20)
+                    except Exception:
+                        proc.kill()
+                        proc.wait()
+                    print("server exited %r" % proc.returncode)
+                    log.close()
+                    with open(log_path, "rb") as handle:
+                        lines = handle.read().decode("utf-8", "replace").strip().splitlines()
+                    print("--- server log tail ---")
+                    for line in lines[-10:]:
+                        print(line)
+
+                if failures:
+                    print("FAILED %d assertion(s): %s" % (len(failures), failures))
+                    sys.exit(1)
+                print("readiness and 4xx contracts hold")
+                PYEOF
+            - check: every advertised response format encodes real bytes and readiness answers 200 only when the model is loaded
+              exit_status: 0
+              command: |
+                python3 - <<'PYEOF'
+                import importlib.util
+                import os
+                import sys
+
+                import numpy as np
+
+                server = os.path.join(os.path.expanduser("~"), ".local", "bin", "qwen3-tts-server.py")
+                spec = importlib.util.spec_from_file_location("qwen3_tts_server", server)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["qwen3_tts_server"] = module
+                spec.loader.exec_module(module)
+
+                failures = []
+
+                def check(name, condition, detail=""):
+                    if condition:
+                        print("PASS " + name)
+                    else:
+                        print("FAIL " + name + " :: " + str(detail))
+                        failures.append(name)
+
+                container = {
+                    "wav": lambda data: data[:4] == b"RIFF",
+                    "flac": lambda data: data[:4] == b"fLaC",
+                    "mp3": lambda data: len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0,
+                    "pcm": lambda data: len(data) == 4800,
+                }
+                check("the advertised formats are the ones this environment can produce", set(module.SUPPORTED_FORMATS) >= {"wav", "pcm", "flac", "mp3"}, module.SUPPORTED_FORMATS)
+                audio = np.zeros(2400, dtype="int16")
+                for name in module.SUPPORTED_FORMATS:
+                    payload = module.encode_audio(audio, 24000, name)
+                    check("response_format " + repr(name) + " encodes bytes in its own container", bool(payload) and container[name](payload), (name, len(payload), payload[:4].hex()))
+
+                code, body = module.readiness({"loaded": True, "loading": False, "attempts": 1, "voices": ["vivian"], "voices_source": "model"})
+                check("/health answers 200 once the model is loaded", code == 200 and body.get("status") == "ok", (code, body))
+                code, body = module.readiness({"loaded": False, "loading": True, "attempts": 0})
+                check("/health answers 503 while the checkpoint is loading", code == 503 and body.get("status") == "loading", (code, body))
+                code, body = module.readiness({"loaded": False, "loading": False, "attempts": 2, "last_error": "Traceback (most recent call last):\nValueError: CUDA out of memory"})
+                check("/health answers 503 and names a failed load", code == 503 and body.get("status") == "error" and "out of memory" in (body.get("detail") or ""), (code, body))
+
+                import inspect
+
+                check(
+                    "the renderer accepts a per-request style instruction",
+                    "instruct" in inspect.signature(module._render).parameters,
+                    str(inspect.signature(module._render)),
+                )
+
+                if failures:
+                    print("FAILED %d assertion(s): %s" % (len(failures), failures))
+                    sys.exit(1)
+                print("response formats and readiness mapping hold")
+                PYEOF
 
 # ---------------------------------------------------------------------------
 # Routing-only skill node: the prose lives at
