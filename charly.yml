@@ -15,10 +15,16 @@ qwen3-tts:
             - '@github.com/opencharly/layer-python:v2026.293.1922'
             - '@github.com/opencharly/layer-supervisord:v2026.271.1817'
         # torch/triton JIT-compile kernels at synthesis time and need a C compiler in the
-        # image; a bare Fedora base fails synthesis with "Failed to find C compiler".
+        # image; a bare base fails synthesis with "Failed to find C compiler". The
+        # package NAME is distro-specific: Fedora splits the C++ driver into gcc-c++,
+        # while Arch/CachyOS ships it inside `gcc` (no gcc-c++ package exists there), so
+        # the per-distro section adds only what each one needs.
         package:
             - gcc
-            - gcc-c++
+        distro:
+            fedora:
+                package:
+                    - gcc-c++
         env:
             QWEN3_TTS_MODEL: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
             QWEN3_TTS_PORT: "8000"
