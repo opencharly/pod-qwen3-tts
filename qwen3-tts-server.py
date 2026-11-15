@@ -355,15 +355,24 @@ def models():
     return {"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]}
 
 
-@app.get("/v1/audio/voices")
-def voices():
-    state = _snapshot()
-    if state["loaded"] and state["voices"]:
+def voices_payload(state):
+    """Return the voice list the picker reads, and where it came from.
+
+    Pure over a /health state snapshot: the checkpoint's own speaker list once it is
+    known, the preset fallback before that — and `source` names which, so a client can
+    tell an authoritative list from a provisional one.
+    """
+    if state.get("loaded") and state.get("voices"):
         return {
             "voices": [{"id": name, "name": name} for name in state["voices"]],
-            "source": state["voices_source"],
+            "source": state.get("voices_source"),
         }
     return {"voices": [{"id": name, "name": name} for name in FALLBACK_VOICES], "source": "fallback"}
+
+
+@app.get("/v1/audio/voices")
+def voices():
+    return voices_payload(_snapshot())
 
 
 @app.post("/v1/audio/speech")

@@ -163,6 +163,15 @@ qwen3-tts:
                     check("/v1/models answers 200 while the checkpoint is still warming", status == 200, status)
                     check("/v1/models names the served checkpoint", served.get("data", [{}])[0].get("id") == model, served)
 
+                    voices_status, voices_raw, voices_ct = request("/v1/audio/voices", timeout=60)
+                    voices = as_json(voices_raw)
+                    check("/v1/audio/voices answers 200 before any checkpoint is loaded", voices_status == 200, voices_status)
+                    check(
+                        "the pre-load voice list is the preset fallback, and says so",
+                        len(voices.get("voices", [])) == 9 and voices.get("source") == "fallback",
+                        voices,
+                    )
+
                     # A burst of concurrent callers must be answered as failures rather
                     # than hang or invent a non-audio 200. The single-flight guarantee
                     # itself is proven deterministically in-process by the check below,
@@ -319,6 +328,20 @@ qwen3-tts:
                     "voices_source": "model",
                     "voices": ["vivian", "ono_anna", "sohee"],
                 }
+                payload = module.voices_payload(loaded_state)
+                check(
+                    "the voices route serves the checkpoint's list once it is known, and names the source",
+                    [v["id"] for v in payload["voices"]] == ["vivian", "ono_anna", "sohee"]
+                    and payload["source"] == "model",
+                    payload,
+                )
+                payload = module.voices_payload({"loaded": False})
+                check(
+                    "the voices route serves the preset fallback before the checkpoint loads, and names it",
+                    len(payload["voices"]) == len(module.FALLBACK_VOICES) and payload["source"] == "fallback",
+                    payload["source"],
+                )
+
                 refusal = module.voice_validation(loaded_state, "no-such-voice")
                 check(
                     "a voice the checkpoint does not serve is refused with 400 unsupported_voice",
