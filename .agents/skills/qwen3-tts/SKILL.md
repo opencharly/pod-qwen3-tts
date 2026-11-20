@@ -29,8 +29,9 @@ the charly-owned server the candy ships: the same two routes, over the same upst
 | Volume | `models` at `~/.cache/huggingface` (the checkpoint lives here after first use) |
 | Requires | `layer-python` (pixi builder + env), `layer-supervisord` (the init) |
 | Packages | `gcc`, `gcc-c++` — torch/triton JIT-compile at synthesis time |
-| Python env | `pixi.toml`: torch cu130 from the pytorch index + `qwen-tts==0.1.1` + fastapi/uvicorn/soundfile |
+| Python env | `pixi.toml`: torch cu130 from the pytorch index + `opencharly/Qwen3-TTS` at its CalVer tag (the committed `pixi.lock` records the tag's commit) + fastapi/uvicorn/soundfile |
 | `env_provide` | `QWEN3_TTS_HOST` (`http://{{.ContainerName}}:8000/v1`), `QWEN3_TTS_SERVED_MODEL`, `QWEN3_TTS_VOICE` |
+| `env` | `QWEN3_TTS_IDLE_UNLOAD_S` (idle seconds before the checkpoint is released; `0` = never; the deployment sets `300`) |
 
 ## The contract the consumer sees
 
