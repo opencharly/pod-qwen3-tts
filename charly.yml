@@ -67,11 +67,20 @@ qwen3-tts:
               to: "${HOME}/.local/bin/qwen3-tts-server.py"
               mode: "0755"
               run_as: "${USER}"
+            - run: install the idle-unload test the plan check runs
+              copy: tests/test_idle_unload.py
+              to: "${HOME}/.local/bin/test_idle_unload.py"
+              mode: "0644"
+              run_as: "${USER}"
             - check: the speech server script is present and executable
               file:
                 file: ${HOME}/.local/bin/qwen3-tts-server.py
                 exists: true
                 mode: "0755"
+            - check: the idle-unload thread releases the checkpoint after the TTL
+              id: qwen3-tts-idle-unload-unit
+              exit_status: 0
+              command: python3 /home/user/.local/bin/test_idle_unload.py
             - check: the pixi environment provides torch and soundfile for the server
               exit_status: 0
               command: python3 -c 'import torch, soundfile, fastapi, uvicorn; print("env-ok", torch.__version__)'
