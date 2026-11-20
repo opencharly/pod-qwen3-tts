@@ -31,6 +31,13 @@ qwen3-tts:
                 package:
                     - gcc-c++
         env:
+            # A host-owned bind makes charly run the container as root under its keep-id
+            # mapping, where the runtime HOME is /root — while the server, its checks and
+            # its cache live under the image user's home. Pin both, so a bound deployment
+            # behaves like the unbound one and the checkpoint cache always lands in the
+            # `models` volume that is mounted at ~/.cache/huggingface.
+            HOME: "/home/user"
+            HF_HOME: "/home/user/.cache/huggingface"
             QWEN3_TTS_MODEL: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
             QWEN3_TTS_PORT: "8000"
             QWEN3_TTS_VOICE: "vivian"
