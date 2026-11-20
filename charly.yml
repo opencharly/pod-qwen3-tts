@@ -35,6 +35,9 @@ qwen3-tts:
             QWEN3_TTS_PORT: "8000"
             QWEN3_TTS_VOICE: "vivian"
             QWEN3_TTS_DEVICE: "cuda:0"
+            # Unload the checkpoint after this many idle seconds (0 = never). The
+            # deployment sets 300; the disposable bed sets a short TTL to prove it.
+            QWEN3_TTS_IDLE_UNLOAD_S: "0"
         # The consumer side of this contract is pod-openwebui's env_accept:
         # QWEN3_TTS_HOST is the BASE URL (ending in /v1), and the served model id travels
         # with it because Open WebUI forces a `model` into every speech request.
@@ -64,11 +67,20 @@ qwen3-tts:
               to: "${HOME}/.local/bin/qwen3-tts-server.py"
               mode: "0755"
               run_as: "${USER}"
+            - run: install the idle-unload test the plan check runs
+              copy: tests/test_idle_unload.py
+              to: "${HOME}/.local/bin/test_idle_unload.py"
+              mode: "0644"
+              run_as: "${USER}"
             - check: the speech server script is present and executable
               file:
                 file: ${HOME}/.local/bin/qwen3-tts-server.py
                 exists: true
                 mode: "0755"
+            - check: the idle-unload thread releases the checkpoint after the TTL
+              id: qwen3-tts-idle-unload-unit
+              exit_status: 0
+              command: python3 /home/user/.local/bin/test_idle_unload.py
             - check: the pixi environment provides torch and soundfile for the server
               exit_status: 0
               command: python3 -c 'import torch, soundfile, fastapi, uvicorn; print("env-ok", torch.__version__)'
@@ -291,6 +303,8 @@ qwen3-tts:
                 check("/health answers 503 while the checkpoint is loading", code == 503 and body.get("status") == "loading", (code, body))
                 code, body = module.readiness({"loaded": False, "loading": False, "attempts": 2, "last_error": "Traceback (most recent call last):\nValueError: CUDA out of memory"})
                 check("/health answers 503 and names a failed load", code == 503 and body.get("status") == "error" and "out of memory" in (body.get("detail") or ""), (code, body))
+                code, body = module.readiness({"loaded": False, "loading": False, "attempts": 1, "last_error": None})
+                check("/health answers 503 with the idle-unloaded state after the TTL", code == 503 and body.get("status") == "unloaded", (code, body))
 
                 import inspect
 

@@ -29,6 +29,7 @@ import io
 import os
 import sys
 import threading
+import time
 import traceback
 from contextlib import asynccontextmanager
 
@@ -95,6 +96,9 @@ SUPPORTED_FORMATS = sorted(SUPPORTED_ENCODINGS)
 # field overrides it per call. Passed straight to the model's `instruct` kwarg,
 # so the value is free text describing the delivery (emotion, pace, character).
 INSTRUCT = os.environ.get("QWEN3_TTS_INSTRUCT") or None
+# Unload the checkpoint after this many seconds with no synthesis request (0 = never).
+# The deployment sets 300; the disposable bed sets a short TTL to prove the state machine.
+IDLE_UNLOAD_S = float(os.environ.get("QWEN3_TTS_IDLE_UNLOAD_S", "0") or 0)
 
 _state = {
     "model": None,
@@ -104,6 +108,7 @@ _state = {
     "last_error": None,
     "voices": None,
     "voices_source": None,
+    "last_used": 0.0,
 }
 _cond = threading.Condition(threading.Lock())
 
@@ -123,6 +128,12 @@ def _error_summary(traceback_text):
 def _snapshot():
     with _cond:
         return dict(_state)
+
+
+def _touch():
+    """Record that a synthesis request is using the model (resets the idle TTL)."""
+    with _cond:
+        _state["last_used"] = time.monotonic()
 
 
 def readiness(state):
@@ -213,7 +224,7 @@ def _load_once():
         voices, source = _resolve_voices(model)
     with _cond:
         if model is not None:
-            _state.update(model=model, loaded=True, voices=voices, voices_source=source)
+            _state.update(model=model, loaded=True, voices=voices, voices_source=source, last_used=time.monotonic())
         else:
             _state["last_error"] = failure
         _state["loading"] = False
@@ -287,6 +298,64 @@ def encode_audio(audio, sample_rate, format_name):
 _synth_lock = threading.Lock()
 
 
+def _idle_unload_loop():
+    """Release the checkpoint after IDLE_UNLOAD_S seconds without a synthesis.
+
+    The TTL is measured from the last synthesis request (`_touch` / a successful
+    load). The synthesis lock is taken NON-blocking first, so a request that is
+    generating keeps the model alive; the next request after an unload reloads it.
+    """
+    interval = max(0.5, min(IDLE_UNLOAD_S / 2.0, 30.0))
+    while True:
+        time.sleep(interval)
+        if not _synth_lock.acquire(blocking=False):
+            continue
+        try:
+            idle_for = 0.0
+            victim = None
+            with _cond:
+                if not _state["loaded"]:
+                    continue
+                idle_for = time.monotonic() - float(_state.get("last_used") or 0.0)
+                if idle_for < IDLE_UNLOAD_S:
+                    continue
+                victim = _state["model"]
+                _state.update(model=None, loaded=False, voices=None, voices_source=None)
+                _cond.notify_all()
+            if victim is not None:
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception as exc:
+                    print(
+                        "qwen3-tts: idle unload could not empty the CUDA cache: %r" % (exc,),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                print(
+                    "qwen3-tts: model unloaded after %.1fs idle" % idle_for,
+                    file=sys.stderr,
+                    flush=True,
+                )
+        finally:
+            _synth_lock.release()
+
+
+def start_idle_unload():
+    """Start the idle-unload thread when a TTL is configured (0 = never)."""
+    if IDLE_UNLOAD_S <= 0:
+        print("qwen3-tts: idle unload disabled (QWEN3_TTS_IDLE_UNLOAD_S=0)", file=sys.stderr, flush=True)
+        return
+    threading.Thread(target=_idle_unload_loop, name="qwen3-tts-idle", daemon=True).start()
+    print(
+        "qwen3-tts: model unloads after %.0fs without a synthesis request" % IDLE_UNLOAD_S,
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _render(text, voice, language, format_name, instruct=None):
     """Load-or-wait, synthesize and encode OFF the event loop.
 
@@ -338,6 +407,7 @@ def _error(status_code, error_type, code, message, param=None, **extra):
 @asynccontextmanager
 async def lifespan(_app):
     start_background_load()
+    start_idle_unload()
     yield
 
 
@@ -424,6 +494,7 @@ async def speech(request: Request):
     if refusal is not None:
         return refusal
 
+    _touch()
     print(
         "qwen3-tts: synth voice=%s format=%s chars=%d" % (voice, format_name, len(text)),
         file=sys.stderr,

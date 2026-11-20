@@ -10,7 +10,10 @@ pip = "*"
 [pypi-dependencies]
 # Torch from the CUDA 13 index, the same pin the org's python-ml layer uses.
 torch = { version = ">=2.10.0", index = "https://download.pytorch.org/whl/cu130" }
-qwen-tts = "==0.1.1"
+# The org's fork of QwenLM/Qwen3-TTS at its CalVer tag; pixi.lock records the tag's
+# commit, so the resolution is immutable even though the tag is a name. The fork's
+# 0.6B instruct warning and the package exports are the reason it is not PyPI 0.1.1.
+qwen-tts = { git = "https://github.com/opencharly/Qwen3-TTS", tag = "v2026.324.1131" }
 fastapi = "*"
 uvicorn = "*"
 soundfile = "*"

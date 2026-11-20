@@ -72,10 +72,12 @@ build (opencharly/distro-fedora#110).
 
 ## Pin handles
 
-The upstream `QwenLM/Qwen3-TTS` repo publishes **no releases and no tags**, so this candy pins the
-two handles that DO exist: the PyPI distribution (`qwen-tts==0.1.1` in `pixi.toml`) and the
-checkpoint repo id (`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`, overridable via `QWEN3_TTS_MODEL`).
-Torch is pinned through the pytorch cu130 index at the same floor the org's `python-ml` layer uses.
+The upstream `QwenLM/Qwen3-TTS` repo publishes **no releases and no tags**. This candy consumes
+the org's fork `opencharly/Qwen3-TTS` at its CalVer tag (`v2026.324.1131` in `pixi.toml`; the
+committed `pixi.lock` records the tag's commit), which carries the public-export fixes and the
+honest 0.6B `instruct` warning. The checkpoint repo id remains
+`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`, overridable via `QWEN3_TTS_MODEL`. Torch is pinned
+through the pytorch cu130 index at the same floor the org's `python-ml` layer uses.
 
 ## Verification
 
