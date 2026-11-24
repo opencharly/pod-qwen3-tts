@@ -131,8 +131,7 @@ on-demand worker inherit that env, so a worker downloads into — and loads from
 store. **Do not leave the default per-image named volume (`charly-qwen3-tts-models`) in place for
 this cache**: it duplicates the checkpoint per pod, outside the XDG data root.
 
-The live deployment and the `check-qwen3-tts-pod` bed both bind this path today; the bed's
-`qwen3-tts-model-cache` check asserts the checkpoint is present under `HF_HOME` after synthesis.
+The live deployment and the `check-qwen3-tts-pod` bed both bind this path today.
 
 ## Deployment
 
