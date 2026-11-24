@@ -12,19 +12,19 @@ A supervised HTTP service on port 8000:
 |---|---|
 | `POST /v1/audio/speech` | synthesise `{input, voice, language, response_format}` → audio bytes in the requested format |
 | `GET /v1/audio/voices` | the checkpoint's own speaker list (the hardcoded preset list only until it loads) |
-| `GET /health` | readiness: `200` only when the model can synthesize, `503` + a machine-readable reason while it cannot |
-| `GET /v1/models` | the served model id (answers `200` even during a warm-up) |
+| `GET /health` | readiness: `200` only when the on-demand worker serves; `503` with `unloaded`, `waiting_for_vram`, `loading`, `unloading` or `error` otherwise |
+| `GET /v1/models` | the served model id (answers `200` even while unloaded) |
 
 The upstream `QwenLM/Qwen3-TTS` repo ships **no HTTP server** (a Gradio demo, a CLI and a python
-API only), so this candy ships the server itself — a small FastAPI shim over the upstream
-`qwen-tts` package.
+API only), so this candy ships the server itself — a torch-free FastAPI shim that starts an
+on-demand worker over the upstream `qwen-tts` package.
 
 ## Properties
 
 | Property | Value |
 |---|---|
 | Service | `qwen3-tts` (`%(ENV_HOME)s/.local/bin/qwen3-tts-server.py`) |
-| Port | `8000` |
+| Port | `8000` (the worker listens on a Unix socket, never a published port) |
 | Volume | `models` → `~/.cache/huggingface` |
 | Requires | `layer-python`, `layer-supervisord` |
 | Packages | `gcc`, `gcc-c++` (torch/triton JIT) |
@@ -32,6 +32,7 @@ API only), so this candy ships the server itself — a small FastAPI shim over t
 | Response formats | `wav` (default), `pcm`, `flac`, `mp3` — whatever the installed libsndfile really writes; anything else is a `4xx` |
 | Voices | the checkpoint's own speaker list; fallback: vivian, serena, uncle_fu, dylan, eric, ryan, aiden, ono_anna, sohee |
 | `env_provide` | `QWEN3_TTS_HOST`, `QWEN3_TTS_SERVED_MODEL`, `QWEN3_TTS_VOICE` |
+| VRAM lifecycle | nothing at start; a request waits up to `QWEN3_TTS_GPU_WAIT_SECONDS` (600) for `QWEN3_TTS_GPU_MIN_FREE_MIB` (4096) free, then starts the worker; the worker is killed after `QWEN3_TTS_IDLE_UNLOAD_S` (600) idle |
 
 ## Quick start
 
@@ -41,11 +42,13 @@ charly start qwen3-tts
 curl -s http://127.0.0.1:$(charly status qwen3-tts | grep -oE 'Ports: *[0-9]+' | grep -oE '[0-9]+$')/health
 ```
 
-The checkpoint loads in a **background thread at service start** and is cached in the `models`
-volume afterwards. `/v1/models` answers immediately while the model warms; `/health` is `503` with
-`{"status":"loading"}` until the model can synthesize and `200 {"status":"ok"}` after. A request
-that arrives during the warm-up waits for that one in-flight load instead of starting a second
-one, and a failed load is retried by the next request rather than wedging the service.
+**Nothing loads at service start.** `/health` reports `503 unloaded` and the pod holds no VRAM.
+The first synthesis request waits (bounded) for free NVRAM, starts the on-demand worker, loads the
+checkpoint into the `models` volume and answers. Concurrent requests wait on that one spawn; a
+failed start is retried by the next request rather than wedging the service. After ten idle minutes
+the shim kills the worker, which releases the weights **and the CUDA context**, and the next
+request reloads.
+
 
 ## Using it from Open WebUI
 
