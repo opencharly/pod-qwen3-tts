@@ -17,8 +17,8 @@ qwen3-tts:
             checkpoint's own speaker list, and real audio bytes (wav, mp3, flac or pcm) from
             a POST to /v1/audio/speech.
         require:
-            - '@github.com/opencharly/layer-python:v2026.293.1922'
-            - '@github.com/opencharly/layer-supervisord:v2026.271.1817'
+            - '@github.com/opencharly/layer-python:v2026.314.0709'
+            - '@github.com/opencharly/layer-supervisord:v2026.314.0710'
         # torch/triton JIT-compile kernels at synthesis time and need a C compiler in the
         # image; a bare Fedora base fails synthesis with "Failed to find C compiler".
         # The NAME is distro-specific: Fedora splits the C++ driver into gcc-c++,
