@@ -11,6 +11,7 @@ import sys
 
 import numpy as np
 import soundfile as sf
+from fastapi.responses import JSONResponse
 
 MODEL_ID_DEFAULT = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 DEFAULT_VOICE = "vivian"
@@ -73,3 +74,20 @@ def encode_audio(audio, sample_rate, format_name):
 def media_type(format_name):
     """The response Content-Type for a supported format."""
     return SUPPORTED_ENCODINGS[format_name][2]
+
+
+def error_summary(traceback_text):
+    """The last non-empty traceback line, for a /health body and a 5xx body."""
+    if not traceback_text:
+        return None
+    lines = [line.strip() for line in traceback_text.strip().splitlines() if line.strip()]
+    return lines[-1][:400] if lines else None
+
+
+def error_response(status_code, error_type, code, message, param=None, **extra):
+    """The one OpenAI-shaped error body both processes answer with."""
+    body = {"error": {"message": message, "type": error_type, "code": code}}
+    if param is not None:
+        body["error"]["param"] = param
+    body.update(extra)
+    return JSONResponse(body, status_code=status_code)

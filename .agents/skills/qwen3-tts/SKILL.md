@@ -151,6 +151,19 @@ single-flight, the UDS proxy, the gate in both directions, the idle kill and the
 `tests/test_torch_free.py` (the shim imports neither torch nor `qwen_tts` — the guard that keeps
 the idle release total). They are build-scope, so `charly check box` runs them against the image.
 
+The **real worker boundary** — the actual `qwen3-tts-worker.py` loading torch + the checkpoint,
+serving uvicorn over a Unix socket, writing the ready pipe, dying with its parent, and being killed
+on idle — is proven by `tests/test_real_worker.py` on **CPU** with the candy's own pixi env and a
+populated `HF_HOME`:
+
+```bash
+HF_HOME=~/.local/share/charly/models/huggingface \
+  pixi run python tests/test_real_worker.py
+```
+
+Without the checkpoint it skips visibly (it never mocks the model). It is not a baked plan step
+because the image carries no checkpoint.
+
 ## Related
 
 - `/charly-openwebui:openwebui` — the consumer side: `env_accept`, the `AUDIO_TTS_*` projection, ffmpeg

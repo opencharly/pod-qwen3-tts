@@ -17,6 +17,8 @@ Canonical files:
 - `tests/test_surface.py`, `tests/test_common.py`, `tests/test_torch_free.py` — the baked plan's
   checks: lazy start, single-flight, the VRAM gate in both directions, the idle kill, the reload,
   the pure contracts, and the torch-free guard.
+- `tests/test_real_worker.py` — the REAL worker boundary on CPU (torch load, uvicorn-on-UDS, ready
+  pipe, idle kill, PR_SET_PDEATHSIG); skips visibly when the checkpoint is not in `HF_HOME`.
 - `pixi.toml` — the python environment (torch cu130 + `qwen-tts` + fastapi/uvicorn/httpx/soundfile).
 - `.agents/skills/qwen3-tts/SKILL.md` — the owning skill's body (the `skill:` node is routing only).
 - `.github/workflows/tag-on-merge.yml` — CalVer tag + `CHANGELOG/` on merge.

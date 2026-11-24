@@ -28,6 +28,8 @@ from qwen3_tts_common import (
     MODEL_ID_DEFAULT,
     SUPPORTED_ENCODINGS,
     encode_audio,
+    error_response,
+    error_summary as _error_summary,
     media_type,
 )
 
@@ -77,14 +79,6 @@ _state = {
 }
 _synth_lock = threading.Lock()
 _ready_sent = False
-
-
-def _error_summary(traceback_text):
-    """The last non-empty traceback line, for a ready-pipe failure and /health."""
-    if not traceback_text:
-        return None
-    lines = [line.strip() for line in traceback_text.strip().splitlines() if line.strip()]
-    return lines[-1][:400] if lines else None
 
 
 def _ready(line):
@@ -168,14 +162,6 @@ def _render(text, voice, language, format_name, instruct):
     return encode_audio(np.asarray(wavs[0]), sample_rate, format_name)
 
 
-def _error(message, code, status_code, param=None, **extra):
-    body = {"error": {"message": message, "type": "invalid_request_error", "code": code}}
-    if param is not None:
-        body["error"]["param"] = param
-    body.update(extra)
-    return JSONResponse(body, status_code=status_code)
-
-
 app = FastAPI()
 
 
@@ -206,22 +192,23 @@ async def synth(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return _error("the request body must be JSON", "invalid_json", 400)
+        return error_response(400, "invalid_request_error", "invalid_json", "the request body must be JSON")
     if not isinstance(body, dict):
-        return _error("the request body must be a JSON object", "invalid_request", 400)
+        return error_response(400, "invalid_request_error", "invalid_request", "the request body must be a JSON object")
 
     text = body.get("input")
     if not isinstance(text, str) or not text.strip():
-        return _error("input must be a non-empty string", "invalid_input", 400, param="input")
+        return error_response(400, "invalid_request_error", "invalid_input", "input must be a non-empty string", param="input")
     text = text.strip()
 
     format_name = body.get("response_format") or "wav"
     if format_name not in SUPPORTED_ENCODINGS:
-        return _error(
+        return error_response(
+            400,
+            "invalid_request_error",
+            "unsupported_response_format",
             "response_format %r is not supported; this worker produces %s"
             % (format_name, ", ".join(sorted(SUPPORTED_ENCODINGS))),
-            "unsupported_response_format",
-            400,
             supported_formats=sorted(SUPPORTED_ENCODINGS),
         )
 
@@ -232,10 +219,11 @@ async def synth(request: Request):
     served = _state.get("voices") or []
     if _state.get("voices_source") == "model" and served:  # boundary re-check
         if str(voice).lower() not in {name.lower() for name in served}:
-            return _error(
-                "voice %r is not a speaker of %r; supported: %s" % (voice, MODEL_ID, ", ".join(served)),
-                "unsupported_voice",
+            return error_response(
                 400,
+                "invalid_request_error",
+                "unsupported_voice",
+                "voice %r is not a speaker of %r; supported: %s" % (voice, MODEL_ID, ", ".join(served)),
                 param="voice",
                 supported_voices=list(served),
             )

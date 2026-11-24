@@ -48,6 +48,8 @@ from qwen3_tts_common import (
     MODEL_ID_DEFAULT,
     SUPPORTED_ENCODINGS,
     SUPPORTED_FORMATS,
+    error_response as _error,
+    error_summary as _error_summary,
     media_type,
 )
 
@@ -121,14 +123,6 @@ class GpuMemoryUnavailable(RuntimeError):
             "no GPU with >= %d MiB free within %.0fs (last reading: %s MiB)"
             % (min_free_mib, waited_s, last_free_mib)
         )
-
-
-def _error_summary(traceback_text):
-    """The last non-empty traceback line, for a /health body and a 5xx body."""
-    if not traceback_text:
-        return None
-    lines = [line.strip() for line in traceback_text.strip().splitlines() if line.strip()]
-    return lines[-1][:400] if lines else None
 
 
 def _log_tail():
@@ -238,7 +232,7 @@ def _drain_logs(proc):
         pass
 
 
-def _read_ready_pipe(fd, proc, started):
+def _read_ready_pipe(fd, proc):
     """Wait for the worker's one readiness line. Returns (outcome, detail)."""
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     buf = b""
@@ -363,7 +357,7 @@ def _start_once():
             _proc = proc
             _state["worker_pid"] = proc.pid
         threading.Thread(target=_drain_logs, args=(proc,), name="qwen3-tts-worker-logs", daemon=True).start()
-        outcome, detail = _read_ready_pipe(read_fd, proc, time.monotonic())
+        outcome, detail = _read_ready_pipe(read_fd, proc)
     except Exception as exc:
         failure = traceback.format_exc()
         _kill_proc(proc)
@@ -619,14 +613,6 @@ def voice_validation(state, voice):
         param="voice",
         supported_voices=list(served),
     )
-
-
-def _error(status_code, error_type, code, message, param=None, **extra):
-    body = {"error": {"message": message, "type": error_type, "code": code}}
-    if param is not None:
-        body["error"]["param"] = param
-    body.update(extra)
-    return JSONResponse(body, status_code=status_code)
 
 
 @asynccontextmanager
