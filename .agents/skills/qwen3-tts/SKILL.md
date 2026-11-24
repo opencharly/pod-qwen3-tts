@@ -34,7 +34,7 @@ context together. The next request reloads.
 |---|---|
 | Service | `qwen3-tts` (`%(ENV_HOME)s/.local/bin/qwen3-tts-server.py`, `restart: always`, `stop_timeout: 30`) |
 | Port | `8000` (the worker listens on a Unix socket, never a published port) |
-| Volume | `models` at `~/.cache/huggingface` (the checkpoint lives here after first use) |
+| Volume | `models` at `~/.cache/huggingface` (the checkpoint lives here; bind it to the shared XDG data store — see "Model cache" below) |
 | Requires | `layer-python` (pixi builder + env), `layer-supervisord` (the init) |
 | Packages | `gcc`, `gcc-c++` — torch/triton JIT-compile at synthesis time |
 | Python env | `pixi.toml`: torch cu130 from the pytorch index + `opencharly/Qwen3-TTS` at its CalVer tag + fastapi/uvicorn/httpx/soundfile |
@@ -110,6 +110,28 @@ The fallback preset voices are `vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, 
   the worker, escalating to SIGKILL after `QWEN3_TTS_WORKER_STOP_S`. The next request reloads.
 - The checkpoint downloads into the `models` volume on the first load, so the first start on a
   fresh volume still takes minutes; `QWEN3_TTS_LOAD_TIMEOUT_S` bounds that wait.
+
+## Model cache — ONE shared store, in the XDG data root
+
+The checkpoint is Hugging Face **cache** data and belongs in the charly data root the resolver
+owns (`spec/storeroot.Dir(DataRoot)`, DESIGN D-STORE-1 / D-STORE-11 / D-STORE-12), under
+`models/huggingface`. With the default XDG roots that is `~/.local/share/charly/models/huggingface`;
+`XDG_DATA_HOME` / `CHARLY_DATA_HOME` move it with the resolver, never with a hardcoded home path.
+
+Bind the candy's `models` volume there in **every** deployment and every check bed, so the
+checkpoint is downloaded ONCE and read by every qwen3-tts pod:
+
+```bash
+# default XDG data root; with XDG_DATA_HOME/CHARLY_DATA_HOME set, use <data root>/models/huggingface
+charly config qwen3-tts --bind models="$HOME/.local/share/charly/models/huggingface"
+```
+
+The container path stays `${HOME}/.cache/huggingface` and `HF_HOME` points at it; the shim and the
+on-demand worker inherit that env, so a worker downloads into — and loads from — the SAME shared
+store. **Do not leave the default per-image named volume (`charly-qwen3-tts-models`) in place for
+this cache**: it duplicates the checkpoint per pod, outside the XDG data root.
+
+The live deployment and the `check-qwen3-tts-pod` bed both bind this path today.
 
 ## Deployment
 
