@@ -7,8 +7,17 @@ Canonical files:
 
 - `charly.yml` — the `qwen3-tts:` candy entity (description, `require`, `package`, `env`,
   `env_provide`, `port`, `volume`, `service`, `plan`) and its routing-only `skill:` node.
-- `qwen3-tts-server.py` — the charly-owned FastAPI shim over the upstream `qwen-tts` API.
-- `pixi.toml` — the python environment (torch cu130 + `qwen-tts` + fastapi/uvicorn/soundfile).
+- `qwen3-tts-server.py` — the charly-owned, torch-free FastAPI SHIM: validation, the bounded
+  free-VRAM gate, the worker lifecycle (spawn, pipe readiness, idle kill) and the UDS proxy.
+- `qwen3-tts-worker.py` — the on-demand WORKER that imports torch + `qwen-tts`, loads the
+  checkpoint and serves over a Unix socket. Killing it releases ALL VRAM, including the CUDA
+  context; never move model work into the shim.
+- `qwen3_tts_common.py` — the one copy of the encoding probe, voice list and encode helper,
+  imported by both processes; it must never import torch.
+- `tests/test_surface.py`, `tests/test_common.py`, `tests/test_torch_free.py` — the baked plan's
+  checks: lazy start, single-flight, the VRAM gate in both directions, the idle kill, the reload,
+  the pure contracts, and the torch-free guard.
+- `pixi.toml` — the python environment (torch cu130 + `qwen-tts` + fastapi/uvicorn/httpx/soundfile).
 - `.agents/skills/qwen3-tts/SKILL.md` — the owning skill's body (the `skill:` node is routing only).
 - `.github/workflows/tag-on-merge.yml` — CalVer tag + `CHANGELOG/` on merge.
 - `CHANGELOG/` — per-CalVer history.
@@ -24,8 +33,8 @@ Canonical files:
 ## Build / validate / test
 
 - `charly box validate` at the repo root — structural check of the candy and its skill node.
-- The live witness is a composing box's check bed; the candy's own `check:` steps assert the
-  server script, and that the pixi env imports torch, soundfile and `qwen_tts`.
+- The live witness is a composing box's check bed; the candy's own `check:` steps run the three
+  baked tests above and assert the pixi env imports torch, soundfile, httpx and `qwen_tts`.
 - The merge gate is the **org-wide** `charly/pr-validator` (required check `validate / validate`,
   defined in `opencharly/.github`); this repo has **no** per-repo candy gate.
 

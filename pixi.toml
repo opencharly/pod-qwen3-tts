@@ -16,4 +16,6 @@ torch = { version = ">=2.10.0", index = "https://download.pytorch.org/whl/cu130"
 qwen-tts = { git = "https://github.com/opencharly/Qwen3-TTS", tag = "v2026.324.1131" }
 fastapi = "*"
 uvicorn = "*"
+# The shim proxies synthesis to the on-demand worker over a Unix socket.
+httpx = "*"
 soundfile = "*"

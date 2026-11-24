@@ -4,18 +4,18 @@ qwen3-tts:
             Qwen3-TTS speech service — the OpenAI-compatible speech routes Open WebUI's
             `openai` TTS engine calls (POST /v1/audio/speech, GET /v1/audio/voices), served
             over the upstream `qwen-tts` python API by a charly-owned FastAPI shim.
-            Installs a pixi environment (torch cu130 + the qwen-tts package), copies the
-            shim to ${HOME}/.local/bin/qwen3-tts-server.py (mode 0755) and runs it as a
-            supervised service on port 8000. The checkpoint loads in a BACKGROUND thread at
-            service start, so uvicorn answers /v1/models in milliseconds while the model is
-            still warming; /health is the readiness signal (503 with a machine-readable
-            reason until the model serves, 200 after), a failed load stays retriable instead
-            of wedging the process, and every request is validated before anything loads
-            (a foreign model id or an unsupported response_format is a 4xx naming what this
-            server does serve). Observable: the running `qwen3-tts` service, the published
-            port, a 503 from /health while warming and a 200 once it serves, the
-            checkpoint's own speaker list, and real audio bytes (wav, mp3, flac or pcm) from
-            a POST to /v1/audio/speech.
+            The public shim holds NO model: it starts an on-demand worker process (torch +
+            qwen-tts) on the first synthesis request, waits (bounded) for enough free VRAM
+            before spawning it, and kills the worker after 10 idle minutes — so at rest the
+            pod uses no VRAM at all, including no CUDA context. /health is the readiness
+            signal (503 with a machine-readable reason while unloaded, waiting for VRAM or
+            loading; 200 once the worker serves); a failed start is retried by the next
+            request, never sticky; and every request is validated before anything starts (a
+            foreign model id or an unsupported response_format is a 4xx naming what this
+            server does serve). Observable: the running `qwen3-tts` service, /health saying
+            `unloaded` at start, a synthesis returning real audio (wav, mp3, flac or pcm),
+            the worker pid appearing in /health and disappearing after the idle TTL, and the
+            GPU returning to its pre-load free-memory level.
         require:
             - '@github.com/opencharly/layer-python:v2026.314.0709'
             - '@github.com/opencharly/layer-supervisord:v2026.314.0710'
@@ -42,9 +42,16 @@ qwen3-tts:
             QWEN3_TTS_PORT: "8000"
             QWEN3_TTS_VOICE: "vivian"
             QWEN3_TTS_DEVICE: "cuda:0"
-            # Unload the checkpoint after this many idle seconds (0 = never). The
-            # deployment sets 300; the disposable bed sets a short TTL to prove it.
-            QWEN3_TTS_IDLE_UNLOAD_S: "0"
+            # Load nothing at start: the checkpoint is loaded only when a synthesis
+            # request arrives, and the worker that holds it is killed after this many idle
+            # seconds (0 = never). Killing the PROCESS releases the CUDA context too, not
+            # just the weights — the whole point of the worker split.
+            QWEN3_TTS_IDLE_UNLOAD_S: "600"
+            # The free-VRAM floor (MiB) and the bounded wait before the worker is spawned.
+            # `0` disables the gate (a deliberate CPU deployment); QWEN3_TTS_DEVICE=cpu
+            # also skips it. Set the floor from the worker's MEASURED peak, not a guess.
+            QWEN3_TTS_GPU_MIN_FREE_MIB: "4096"
+            QWEN3_TTS_GPU_WAIT_SECONDS: "600"
         # The consumer side of this contract is pod-openwebui's env_accept:
         # QWEN3_TTS_HOST is the BASE URL (ending in /v1), and the served model id travels
         # with it because Open WebUI forces a `model` into every speech request.
@@ -60,6 +67,8 @@ qwen3-tts:
         service:
             - name: qwen3-tts
               exec: "%(ENV_HOME)s/.local/bin/qwen3-tts-server.py"
+              # The shim's shutdown must reap the worker before supervisord escalates.
+              stop_timeout: 30
               restart: always
               enable: true
         plan:
@@ -69,384 +78,76 @@ qwen3-tts:
             - run: create the user binary directory
               mkdir: "${HOME}/.local/bin"
               run_as: "${USER}"
-            - run: install the charly-owned speech server
+            - run: install the charly-owned public speech shim
               copy: qwen3-tts-server.py
               to: "${HOME}/.local/bin/qwen3-tts-server.py"
               mode: "0755"
               run_as: "${USER}"
-            - run: install the idle-unload test the plan check runs
-              copy: tests/test_idle_unload.py
-              to: "${HOME}/.local/bin/test_idle_unload.py"
+            - run: install the on-demand speech worker
+              copy: qwen3-tts-worker.py
+              to: "${HOME}/.local/bin/qwen3-tts-worker.py"
+              mode: "0755"
+              run_as: "${USER}"
+            - run: install the shared qwen3-tts constants and helpers
+              copy: qwen3_tts_common.py
+              to: "${HOME}/.local/bin/qwen3_tts_common.py"
               mode: "0644"
               run_as: "${USER}"
-            - check: the speech server script is present and executable
+            - run: install the shim/worker surface test the plan runs
+              copy: tests/test_surface.py
+              to: "${HOME}/.local/bin/test_surface.py"
+              mode: "0644"
+              run_as: "${USER}"
+            - run: install the pure-contract test the plan runs
+              copy: tests/test_common.py
+              to: "${HOME}/.local/bin/test_common.py"
+              mode: "0644"
+              run_as: "${USER}"
+            - run: install the torch-free guard the plan runs
+              copy: tests/test_torch_free.py
+              to: "${HOME}/.local/bin/test_torch_free.py"
+              mode: "0644"
+              run_as: "${USER}"
+            - check: the public speech shim is present and executable
               file:
                 file: ${HOME}/.local/bin/qwen3-tts-server.py
                 exists: true
                 mode: "0755"
-            - check: the idle-unload thread releases the checkpoint after the TTL
-              id: qwen3-tts-idle-unload-unit
+            - check: the on-demand speech worker is present and executable
+              file:
+                file: ${HOME}/.local/bin/qwen3-tts-worker.py
+                exists: true
+                mode: "0755"
+            - check: the shared constants module is present
+              file:
+                file: ${HOME}/.local/bin/qwen3_tts_common.py
+                exists: true
+            - check: the pixi environment provides torch, soundfile, httpx and the web stack
               exit_status: 0
-              command: python3 /home/user/.local/bin/test_idle_unload.py
-            - check: the pixi environment provides torch and soundfile for the server
-              exit_status: 0
-              command: python3 -c 'import torch, soundfile, fastapi, uvicorn; print("env-ok", torch.__version__)'
+              command: python3 -c 'import torch, soundfile, fastapi, uvicorn, httpx; print("env-ok", torch.__version__)'
             - check: the qwen-tts package the server imports resolves in the pixi environment
               exit_status: 0
               command: python3 -c 'import qwen_tts; print("qwen-tts-ok")'
-            # The two checks below pin the honesty contract of the shim itself, on a
-            # container with no checkpoint and no GPU: the readiness state machine, the
-            # request validation that must happen BEFORE a load, and the encoder map are
-            # all answerable without loading a model. The first starts the server with an
-            # unloadable checkpoint and offline, so every load attempt fails fast; the
-            # second imports the installed module and asserts the parts that need no
-            # request at all.
-            - check: the server keeps its OpenAI surface up while the checkpoint is unloadable and refuses what it cannot serve
+            # The three checks below pin the shim/worker split on a container with no
+            # checkpoint and no GPU. The surface check drives a STUB worker over the real
+            # UDS path: nothing at boot, one spawn per burst, the VRAM gate in both
+            # directions, the idle kill, the reload, and a failed start retried by the next
+            # request. The common check asserts the encoding/voice/readiness contracts. The
+            # torch-free check is the guard that keeps the idle kill total.
+            - check: the shim starts nothing at boot, starts one worker per burst, gates on free VRAM, and kills it on idle
+              id: qwen3-tts-surface
               exit_status: 0
-              command: |
-                python3 - <<'PYEOF'
-                import json, os, subprocess, sys, tempfile, threading, time
-                import urllib.error
-                import urllib.request
-
-                port = 18001
-                base = "http://127.0.0.1:%d" % port
-                model = "Qwen/Qwen3-TTS-12Hz-0.6B-AbsentFromThisImage"
-                server = os.path.join(os.path.expanduser("~"), ".local", "bin", "qwen3-tts-server.py")
-                failures = []
-
-                def check(name, condition, detail=""):
-                    if condition:
-                        print("PASS " + name)
-                    else:
-                        print("FAIL " + name + " :: " + str(detail))
-                        failures.append(name)
-
-                def request(path, body=None, timeout=180):
-                    data = None
-                    headers = {}
-                    if body is not None:
-                        data = json.dumps(body).encode()
-                        headers["Content-Type"] = "application/json"
-                    req = urllib.request.Request(base + path, data=data, headers=headers)
-                    try:
-                        with urllib.request.urlopen(req, timeout=timeout) as resp:
-                            return resp.status, resp.read(), resp.headers.get("Content-Type", "")
-                    except urllib.error.HTTPError as exc:
-                        return exc.code, exc.read(), exc.headers.get("Content-Type", "")
-
-                def as_json(raw):
-                    try:
-                        return json.loads(raw)
-                    except Exception:
-                        return {}
-
-                scratch = tempfile.mkdtemp(prefix="qwen3-tts-check-")
-                log_path = os.path.join(scratch, "server.log")
-                env = dict(os.environ)
-                env.update({
-                    "QWEN3_TTS_PORT": str(port),
-                    "QWEN3_TTS_MODEL": model,
-                    "QWEN3_TTS_DEVICE": "cpu",
-                    "HF_HUB_OFFLINE": "1",
-                    "TRANSFORMERS_OFFLINE": "1",
-                    "HF_HUB_DISABLE_TELEMETRY": "1",
-                    "HF_HUB_CACHE": os.path.join(scratch, "hub"),
-                    "PYTHONUNBUFFERED": "1",
-                })
-                log = open(log_path, "w+b")
-                proc = subprocess.Popen(
-                    [sys.executable, server],
-                    env=env,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                print("server pid %d" % proc.pid)
-                try:
-                    # Readiness probe: the socket answering /v1/models is the condition,
-                    # bounded so a server that never listens fails the step instead of
-                    # hanging it.
-                    deadline = time.monotonic() + 120
-                    status = None
-                    payload = b""
-                    while time.monotonic() < deadline and proc.poll() is None:
-                        try:
-                            status, payload, _ = request("/v1/models", timeout=5)
-                            if status == 200:
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(0.1)
-                    served = as_json(payload)
-                    check("/v1/models answers 200 while the checkpoint is still warming", status == 200, status)
-                    check("/v1/models names the served checkpoint", served.get("data", [{}])[0].get("id") == model, served)
-
-                    voices_status, voices_raw, voices_ct = request("/v1/audio/voices", timeout=60)
-                    voices = as_json(voices_raw)
-                    check("/v1/audio/voices answers 200 before any checkpoint is loaded", voices_status == 200, voices_status)
-                    check(
-                        "the pre-load voice list is the preset fallback, and says so",
-                        len(voices.get("voices", [])) == 9 and voices.get("source") == "fallback",
-                        voices,
-                    )
-
-                    # A burst of concurrent callers must be answered as failures rather
-                    # than hang or invent a non-audio 200. The single-flight guarantee
-                    # itself is proven deterministically in-process by the check below,
-                    # which simulates an in-flight load instead of racing the import.
-                    answers = []
-
-                    def fire():
-                        try:
-                            answers.append(request("/v1/audio/speech", {"input": "concurrent", "response_format": "wav"}, timeout=300)[0])
-                        except Exception as exc:
-                            answers.append(repr(exc)[:100])
-
-                    threads = [threading.Thread(target=fire) for _ in range(6)]
-                    for thread in threads:
-                        thread.start()
-                    for thread in threads:
-                        thread.join()
-                    check("every request in that burst answered 5xx", len(answers) == 6 and all(isinstance(code, int) and code >= 500 for code in answers), answers)
-
-                    health_status, health_raw, _ = request("/health", timeout=60)
-                    health = as_json(health_raw)
-                    check("/health is 503, never 200, while no model is loaded", health_status == 503, health_status)
-                    check("/health speaks the state machine's own word", health.get("status") in ("loading", "error"), health)
-                    check("/health reports loaded=false with a machine-readable reason", health.get("loaded") is False and bool(health.get("detail")), health)
-
-                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "response_format": "opus"})
-                    body = as_json(raw)
-                    check("an unsupported response_format is rejected with 4xx", 400 <= status < 500, status)
-                    check("that rejection names the supported formats", body.get("error", {}).get("code") == "unsupported_response_format" and set(body.get("supported_formats") or []) >= {"wav", "mp3"}, body)
-
-                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "model": "gpt-4o-mini-tts"})
-                    body = as_json(raw)
-                    check("a foreign model id is rejected with 4xx", 400 <= status < 500, status)
-                    check("that rejection names the served checkpoint", body.get("error", {}).get("code") == "model_not_served" and body.get("served_model") == model, body)
-
-                    # Wait for the load to settle (bounded), so the retry measurement is
-                    # not racing it: a request that arrives WHILE a load runs is a waiter,
-                    # and a waiter answers that attempt's failure.
-                    settle = {}
-                    deadline = time.monotonic() + 300
-                    while time.monotonic() < deadline:
-                        settle = as_json(request("/health", timeout=60)[1])
-                        if settle.get("status") == "error":
-                            break
-                        time.sleep(0.2)
-                    check("/health settles on the failed load and keeps its detail", settle.get("status") == "error" and bool(settle.get("detail")), settle)
-                    before = settle.get("load_attempts", 0)
-                    status, raw, _ = request("/v1/audio/speech", {"input": "hello", "response_format": "wav"}, timeout=300)
-                    body = as_json(raw)
-                    check("a request with no loadable checkpoint answers 5xx, never 200", status >= 500, status)
-                    check("that 5xx names the load failure", body.get("error", {}).get("code") == "model_not_loaded" and bool(body.get("detail")), body)
-                    after_first = as_json(request("/health", timeout=60)[1])
-                    check("the failed load is retried by the NEXT request instead of wedging the process", after_first.get("load_attempts", 0) == before + 1, (before, after_first))
-                finally:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=20)
-                    except Exception:
-                        proc.kill()
-                        proc.wait()
-                    print("server exited %r" % proc.returncode)
-                    log.close()
-                    with open(log_path, "rb") as handle:
-                        lines = handle.read().decode("utf-8", "replace").strip().splitlines()
-                    print("--- server log tail ---")
-                    for line in lines[-10:]:
-                        print(line)
-
-                if failures:
-                    print("FAILED %d assertion(s): %s" % (len(failures), failures))
-                    sys.exit(1)
-                print("readiness and 4xx contracts hold")
-                PYEOF
-            - check: every advertised response format encodes real bytes and readiness answers 200 only when the model is loaded
+              timeout: 10m
+              command: python3 /home/user/.local/bin/test_surface.py
+            - check: the encoding, voice, readiness and state-machine contracts hold without a checkpoint
+              id: qwen3-tts-contracts
               exit_status: 0
-              command: |
-                python3 - <<'PYEOF'
-                import importlib.util
-                import json
-                import os
-                import sys
-                import threading
-                import time
+              command: python3 /home/user/.local/bin/test_common.py
+            - check: the public shim imports no torch or qwen_tts, so the idle kill releases ALL VRAM
+              id: qwen3-tts-torch-free
+              exit_status: 0
+              command: python3 /home/user/.local/bin/test_torch_free.py
 
-                import numpy as np
-
-                server = os.path.join(os.path.expanduser("~"), ".local", "bin", "qwen3-tts-server.py")
-                spec = importlib.util.spec_from_file_location("qwen3_tts_server", server)
-                module = importlib.util.module_from_spec(spec)
-                sys.modules["qwen3_tts_server"] = module
-                spec.loader.exec_module(module)
-
-                failures = []
-
-                def check(name, condition, detail=""):
-                    if condition:
-                        print("PASS " + name)
-                    else:
-                        print("FAIL " + name + " :: " + str(detail))
-                        failures.append(name)
-
-                container = {
-                    "wav": lambda data: data[:4] == b"RIFF",
-                    "flac": lambda data: data[:4] == b"fLaC",
-                    "mp3": lambda data: len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0,
-                    "pcm": lambda data: len(data) == 4800,
-                }
-                check("the advertised formats are the ones this environment can produce", set(module.SUPPORTED_FORMATS) >= {"wav", "pcm", "flac", "mp3"}, module.SUPPORTED_FORMATS)
-                audio = np.zeros(2400, dtype="int16")
-                for name in module.SUPPORTED_FORMATS:
-                    payload = module.encode_audio(audio, 24000, name)
-                    check("response_format " + repr(name) + " encodes bytes in its own container", bool(payload) and container[name](payload), (name, len(payload), payload[:4].hex()))
-
-                code, body = module.readiness({"loaded": True, "loading": False, "attempts": 1, "voices": ["vivian"], "voices_source": "model"})
-                check("/health answers 200 once the model is loaded", code == 200 and body.get("status") == "ok", (code, body))
-                code, body = module.readiness({"loaded": False, "loading": True, "attempts": 0})
-                check("/health answers 503 while the checkpoint is loading", code == 503 and body.get("status") == "loading", (code, body))
-                code, body = module.readiness({"loaded": False, "loading": False, "attempts": 2, "last_error": "Traceback (most recent call last):\nValueError: CUDA out of memory"})
-                check("/health answers 503 and names a failed load", code == 503 and body.get("status") == "error" and "out of memory" in (body.get("detail") or ""), (code, body))
-                code, body = module.readiness({"loaded": False, "loading": False, "attempts": 1, "last_error": None})
-                check("/health answers 503 with the idle-unloaded state after the TTL", code == 503 and body.get("status") == "unloaded", (code, body))
-
-                import inspect
-
-                check(
-                    "the renderer accepts a per-request style instruction",
-                    "instruct" in inspect.signature(module._render).parameters,
-                    str(inspect.signature(module._render)),
-                )
-
-                class _FakeModel:
-                    def __init__(self, speakers=None, boom=False):
-                        self._speakers = speakers
-                        self._boom = boom
-
-                    def get_supported_speakers(self):
-                        if self._boom:
-                            raise RuntimeError("this checkpoint exposes no speaker table")
-                        return self._speakers
-
-                voices, source = module._resolve_voices(_FakeModel(["vivian", "ono_anna"]))
-                check(
-                    "the voice list is derived from the checkpoint's own speaker table",
-                    voices == ["vivian", "ono_anna"] and source == "model",
-                    (voices, source),
-                )
-                voices, source = module._resolve_voices(_FakeModel(boom=True))
-                check(
-                    "a checkpoint that exposes no speaker table falls back to the preset list and says so",
-                    source == "fallback" and sorted(voices) == sorted(module.FALLBACK_VOICES),
-                    (voices, source),
-                )
-
-                loaded_state = {
-                    "loaded": True,
-                    "voices_source": "model",
-                    "voices": ["vivian", "ono_anna", "sohee"],
-                }
-                payload = module.voices_payload(loaded_state)
-                check(
-                    "the voices route serves the checkpoint's list once it is known, and names the source",
-                    [v["id"] for v in payload["voices"]] == ["vivian", "ono_anna", "sohee"]
-                    and payload["source"] == "model",
-                    payload,
-                )
-                payload = module.voices_payload({"loaded": False})
-                check(
-                    "the voices route serves the preset fallback before the checkpoint loads, and names it",
-                    len(payload["voices"]) == len(module.FALLBACK_VOICES) and payload["source"] == "fallback",
-                    payload["source"],
-                )
-
-                refusal = module.voice_validation(loaded_state, "no-such-voice")
-                check(
-                    "a voice the checkpoint does not serve is refused with 400 unsupported_voice",
-                    refusal is not None
-                    and refusal.status_code == 400
-                    and json.loads(refusal.body)["error"]["code"] == "unsupported_voice",
-                    None if refusal is None else (refusal.status_code, refusal.body[:160]),
-                )
-                check(
-                    "a voice the checkpoint serves is accepted",
-                    module.voice_validation(loaded_state, "ono_anna") is None,
-                )
-                check(
-                    "voice validation stays out of the way until the checkpoint's own list is known",
-                    module.voice_validation({"loaded": False}, "anything") is None,
-                )
-
-                # Single-flight + retry, proven against a SYNCHRONISED in-flight load rather
-                # than the import's duration: the waiter cannot return while loading is True,
-                # so this is a sync point, not a race.
-                attempts = []
-
-                def fake_load():
-                    # Mirror the REAL _load_once contract: it never raises, it records
-                    # the failure, clears `loading` and wakes the waiters.
-                    attempts.append(1)
-                    with module._cond:
-                        module._state["attempts"] += 1
-                        module._state["last_error"] = "injected load failure"
-                        module._state["loading"] = False
-                        module._cond.notify_all()
-
-                with module._cond:
-                    module._state.update(
-                        loaded=False,
-                        loading=True,
-                        last_error=None,
-                        attempts=0,
-                        voices=[],
-                        voices_source=None,
-                        model=None,
-                    )
-                waited = []
-
-                def wait_worker():
-                    try:
-                        module.ensure_model()
-                        waited.append("returned-without-an-error")
-                    except module.LoadFailed as exc:
-                        waited.append(str(exc))
-
-                waiter = threading.Thread(target=wait_worker)
-                waiter.start()
-                time.sleep(0.2)
-                check(
-                    "a request arriving during an in-flight load waits instead of starting a second one",
-                    waited == [] and attempts == [],
-                    (waited, attempts),
-                )
-                with module._cond:
-                    module._state["loading"] = False
-                    module._cond.notify_all()
-                waiter.join(10)
-                check(
-                    "the waiting request answers the failed attempt instead of hiding it",
-                    bool(waited) and "returned-without-an-error" not in waited[0],
-                    waited,
-                )
-                module._load_once = fake_load
-                try:
-                    module.ensure_model()
-                except module.LoadFailed:
-                    pass
-                check(
-                    "the next request retries the load instead of reusing the cached failure",
-                    len(attempts) == 1,
-                    attempts,
-                )
-
-                if failures:
-                    print("FAILED %d assertion(s): %s" % (len(failures), failures))
-                    sys.exit(1)
-                print("response formats, readiness, voice contract and single-flight hold")
-                PYEOF
 
 # ---------------------------------------------------------------------------
 # Routing-only skill node: the prose lives at
