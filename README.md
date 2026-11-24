@@ -25,7 +25,7 @@ on-demand worker over the upstream `qwen-tts` package.
 |---|---|
 | Service | `qwen3-tts` (`%(ENV_HOME)s/.local/bin/qwen3-tts-server.py`) |
 | Port | `8000` (the worker listens on a Unix socket, never a published port) |
-| Volume | `models` → `~/.cache/huggingface` |
+| Volume | `models` → `~/.cache/huggingface`; bind it to `<charly data root>/models/huggingface` (default `~/.local/share/charly/models/huggingface`) so every pod shares ONE cached checkpoint |
 | Requires | `layer-python`, `layer-supervisord` |
 | Packages | `gcc`, `gcc-c++` (torch/triton JIT) |
 | Default model | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` |
@@ -37,10 +37,19 @@ on-demand worker over the upstream `qwen-tts` package.
 ## Quick start
 
 ```bash
-charly config qwen3-tts
+# bind the model cache to the shared store in the XDG data root (see "Model cache" below)
+charly config qwen3-tts --bind models="$HOME/.local/share/charly/models/huggingface"
 charly start qwen3-tts
 curl -s http://127.0.0.1:$(charly status qwen3-tts | grep -oE 'Ports: *[0-9]+' | grep -oE '[0-9]+$')/health
 ```
+
+**Model cache — one shared store.** The checkpoint is Hugging Face cache data, so it belongs in the
+charly data root the resolver owns (`spec/storeroot`, DESIGN D-STORE-1/11/12) under
+`models/huggingface` — `~/.local/share/charly/models/huggingface` with the default XDG roots.
+Binding the `models` volume there in every deployment and check bed means the checkpoint is
+downloaded once and read by every qwen3-tts pod. The shim and the on-demand worker inherit
+`HF_HOME`, so they both read and download into that same store. Do not keep the default per-image
+named volume for this cache: it duplicates the checkpoint per pod.
 
 **Nothing loads at service start.** `/health` reports `503 unloaded` and the pod holds no VRAM.
 The first synthesis request waits (bounded) for free NVRAM, starts the on-demand worker, loads the
