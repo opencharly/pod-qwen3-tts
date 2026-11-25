@@ -108,6 +108,11 @@ qwen3-tts:
               to: "${HOME}/.local/bin/test_torch_free.py"
               mode: "0644"
               run_as: "${USER}"
+            - run: install the NVML-gate test the plan runs
+              copy: tests/test_nvml_gate.py
+              to: "${HOME}/.local/bin/test_nvml_gate.py"
+              mode: "0644"
+              run_as: "${USER}"
             - check: the public speech shim is present and executable
               file:
                 file: ${HOME}/.local/bin/qwen3-tts-server.py
@@ -147,6 +152,11 @@ qwen3-tts:
               id: qwen3-tts-torch-free
               exit_status: 0
               command: python3 /home/user/.local/bin/test_torch_free.py
+            - check: the free-VRAM gate reads NVML through the injected library, not the nvidia-smi CLI
+              id: qwen3-tts-nvml-gate
+              exit_status: 0
+              timeout: 2m
+              command: python3 /home/user/.local/bin/test_nvml_gate.py
 
 
 # ---------------------------------------------------------------------------

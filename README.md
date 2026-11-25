@@ -34,10 +34,11 @@ on-demand worker over the upstream `qwen-tts` package.
 | `env_provide` | `QWEN3_TTS_HOST`, `QWEN3_TTS_SERVED_MODEL`, `QWEN3_TTS_VOICE` |
 | VRAM lifecycle | nothing at start; a request waits up to `QWEN3_TTS_GPU_WAIT_SECONDS` (600) for `QWEN3_TTS_GPU_MIN_FREE_MIB` (4096) free, then starts the worker; the worker is killed after `QWEN3_TTS_IDLE_UNLOAD_S` (600) idle |
 
-**The image must ship `nvidia-smi`.** The gate samples free VRAM by exec'ing it; CDI injects the
-driver libraries at runtime, not the CLI, so an image without `nvidia-utils` answers
-`503 gpu_unavailable` on every synthesis and never starts a worker. Compose
-`@github.com/opencharly/layer-nvidia`, as `distro-cachyos/box/qwen3-tts` does.
+**The gate reads NVML (`libnvidia-ml.so.1`), the library the container runtime injects** — not the
+`nvidia-smi` CLI, which the runtime does not always provide (measured: the library and
+`/dev/nvidia0` were present in a deployment that had no `nvidia-smi`). The image must not bake
+`nvidia-utils` or any other NVIDIA binary; the pod/driver contract fails such a build. A deploy
+without a device answers `503 gpu_unavailable`.
 
 ## Quick start
 

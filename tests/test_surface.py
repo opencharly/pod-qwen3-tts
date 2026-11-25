@@ -252,11 +252,9 @@ def main():
         print(shim.tail())
         shim.stop()
 
-    # The gate REFUSES: an impossible floor with a bounded wait.
-    low = os.path.join(workdir, "nvidia-smi-low")
-    with open(low, "w") as fh:
-        fh.write("#!/bin/sh\necho 1024\n")
-    os.chmod(low, 0o755)
+    # The gate REFUSES: an impossible floor with a bounded wait. The reading is pinned
+    # through the documented diagnostic override, so the test needs neither a GPU nor a
+    # CLI: the gate's own source is NVML (`libnvidia-ml.so.1`), which the runtime injects.
     gate = Shim(
         workdir,
         18082,
@@ -265,7 +263,7 @@ def main():
             "QWEN3_TTS_GPU_MIN_FREE_MIB": "999999",
             "QWEN3_TTS_GPU_WAIT_SECONDS": "1",
             "QWEN3_TTS_GPU_POLL_S": "0.2",
-            "QWEN3_TTS_NVIDIA_SMI": low,
+            "QWEN3_TTS_GPU_FREE_MIB": "1024",
             "QWEN3_TTS_IDLE_UNLOAD_S": "0",
         },
     )
@@ -283,10 +281,6 @@ def main():
         gate.stop()
 
     # The gate PASSES: enough free memory, and the wait is visible.
-    high = os.path.join(workdir, "nvidia-smi-high")
-    with open(high, "w") as fh:
-        fh.write("#!/bin/sh\necho 8192\n")
-    os.chmod(high, 0o755)
     passed = Shim(
         workdir,
         18083,
@@ -295,7 +289,7 @@ def main():
             "QWEN3_TTS_GPU_MIN_FREE_MIB": "512",
             "QWEN3_TTS_GPU_WAIT_SECONDS": "10",
             "QWEN3_TTS_GPU_POLL_S": "0.2",
-            "QWEN3_TTS_NVIDIA_SMI": high,
+            "QWEN3_TTS_GPU_FREE_MIB": "8192",
             "QWEN3_TTS_IDLE_UNLOAD_S": "0",
         },
     )

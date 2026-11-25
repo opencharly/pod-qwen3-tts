@@ -28,9 +28,9 @@ Contracts this module keeps honest:
 """
 import asyncio
 import collections
+import ctypes
 import os
 import select
-import shutil
 import subprocess
 import sys
 import threading
@@ -67,9 +67,16 @@ IDLE_UNLOAD_S = float(os.environ.get("QWEN3_TTS_IDLE_UNLOAD_S", "600") or 0)
 # Free-VRAM floor and the bounded wait before the worker is spawned.
 GPU_MIN_FREE_MIB = int(os.environ.get("QWEN3_TTS_GPU_MIN_FREE_MIB", "4096") or 0)
 GPU_WAIT_SECONDS = float(os.environ.get("QWEN3_TTS_GPU_WAIT_SECONDS", "600") or 0)
-GPU_INDEX = os.environ.get("QWEN3_TTS_GPU_INDEX", "0")
+GPU_INDEX = int(os.environ.get("QWEN3_TTS_GPU_INDEX", "0") or 0)
 GPU_POLL_S = float(os.environ.get("QWEN3_TTS_GPU_POLL_S", "5") or 5)
-NVIDIA_SMI = os.environ.get("QWEN3_TTS_NVIDIA_SMI", "nvidia-smi")
+# The driver API the container runtime injects into a GPU pod. NVML is the LIBRARY
+# (`libnvidia-ml.so.1`, mounted by the NVIDIA container runtime alongside the device
+# nodes); the `nvidia-smi` CLI is a separate binary the runtime does not always
+# provide, so the gate must not depend on it.
+NVML_LIB = os.environ.get("QWEN3_TTS_NVML_LIB", "libnvidia-ml.so.1")
+# Diagnostic/fault-injection override of the free-memory reading, in MiB. Unset in
+# any deployment: the gate then reads NVML. Set only to pin a value on purpose.
+GPU_FREE_MIB = os.environ.get("QWEN3_TTS_GPU_FREE_MIB")
 # spawn -> ready deadline, covering a cold checkpoint download.
 LOAD_TIMEOUT_S = float(os.environ.get("QWEN3_TTS_LOAD_TIMEOUT_S", "1800") or 1800)
 WORKER = os.environ.get(
@@ -145,34 +152,85 @@ def _gate_enabled():
     return DEVICE.startswith("cuda") and GPU_MIN_FREE_MIB > 0
 
 
+class _NvmlMemory(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+
+_nvml_lock = threading.Lock()
+_nvml_lib_cache = None
+
+
+def _nvml():
+    """Load and initialise NVML once; return the CDLL. Raises GpuUnavailable."""
+    global _nvml_lib_cache
+    with _nvml_lock:
+        if _nvml_lib_cache is None:
+            try:
+                lib = ctypes.CDLL(NVML_LIB)
+            except OSError as exc:
+                raise GpuUnavailable(
+                    "%s could not be loaded (%s). The container runtime injects this library into "
+                    "a GPU pod; a host without it has no NVIDIA driver." % (NVML_LIB, exc)
+                )
+            for name in (
+                "nvmlInit_v2",
+                "nvmlDeviceGetCount_v2",
+                "nvmlDeviceGetHandleByIndex_v2",
+                "nvmlDeviceGetMemoryInfo",
+            ):
+                if not hasattr(lib, name):
+                    raise GpuUnavailable("%s does not export %s" % (NVML_LIB, name))
+            rc = lib.nvmlInit_v2()
+            if rc != 0:
+                raise GpuUnavailable("nvmlInit_v2 failed with NVML error %d" % rc)
+            _nvml_lib_cache = lib
+        return _nvml_lib_cache
+
+
 def _free_vram_mib():
-    """Read the configured GPU's free memory, in MiB. Raises GpuUnavailable."""
-    if shutil.which(NVIDIA_SMI) is None:
+    """Free memory on the configured GPU, in MiB, through NVML. Raises GpuUnavailable.
+
+    NVML is the driver library the runtime injects (`libnvidia-ml.so.1`, mounted
+    next to the device nodes), so the gate works in a pod whose image ships no
+    NVIDIA tooling — the `nvidia-smi` CLI is a separate binary the runtime does not
+    always provide, and depending on it made the gate fail in exactly that case.
+    """
+    override = (GPU_FREE_MIB or "").strip()
+    if override:
+        try:
+            return int(float(override))
+        except ValueError:
+            raise GpuUnavailable("QWEN3_TTS_GPU_FREE_MIB=%r is not a number of MiB" % (override,))
+    lib = _nvml()
+    count = ctypes.c_uint(0)
+    rc = lib.nvmlDeviceGetCount_v2(ctypes.byref(count))
+    if rc != 0:
+        raise GpuUnavailable("nvmlDeviceGetCount_v2 failed with NVML error %d" % rc)
+    if count.value == 0:
         raise GpuUnavailable(
-            "%s was not found, but QWEN3_TTS_DEVICE=%s requires an NVIDIA GPU "
-            "(set QWEN3_TTS_GPU_MIN_FREE_MIB=0 for a deliberate CPU deployment)"
-            % (NVIDIA_SMI, DEVICE)
+            "NVML reports no NVIDIA device, but QWEN3_TTS_DEVICE=%s requires one "
+            "(set QWEN3_TTS_GPU_MIN_FREE_MIB=0 for a deliberate CPU deployment)" % DEVICE
         )
-    try:
-        proc = subprocess.run(
-            [NVIDIA_SMI, "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", str(GPU_INDEX)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise GpuUnavailable("%s did not answer within 10s: %r" % (NVIDIA_SMI, exc))
-    if proc.returncode != 0:
+    if GPU_INDEX < 0 or GPU_INDEX >= count.value:
         raise GpuUnavailable(
-            "%s exited %d: %s" % (NVIDIA_SMI, proc.returncode, (proc.stderr or proc.stdout).strip()[:300])
+            "QWEN3_TTS_GPU_INDEX=%d is out of range: NVML reports %d device(s)"
+            % (GPU_INDEX, count.value)
         )
-    lines = [line.strip() for line in (proc.stdout or "").strip().splitlines() if line.strip()]
-    if not lines:
-        raise GpuUnavailable("%s returned no free-memory reading" % NVIDIA_SMI)
-    try:
-        return int(float(lines[0]))
-    except ValueError:
-        raise GpuUnavailable("%s returned an unreadable reading: %r" % (NVIDIA_SMI, lines[0]))
+    handle = ctypes.c_void_p()
+    rc = lib.nvmlDeviceGetHandleByIndex_v2(GPU_INDEX, ctypes.byref(handle))
+    if rc != 0:
+        raise GpuUnavailable(
+            "nvmlDeviceGetHandleByIndex_v2(%d) failed with NVML error %d" % (GPU_INDEX, rc)
+        )
+    mem = _NvmlMemory()
+    rc = lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem))
+    if rc != 0:
+        raise GpuUnavailable("nvmlDeviceGetMemoryInfo failed with NVML error %d" % rc)
+    return int(mem.free // (1024 * 1024))
 
 
 def _free_vram_or_none():
