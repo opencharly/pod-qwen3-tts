@@ -146,6 +146,13 @@ and torch's cu130 wheels carry the CUDA runtime, so the plain base is enough. **
 on `nvidia` today** — that base's `layer-cuda` pin predates the `cuda-cccl-fix` and fails to
 build (opencharly/distro-fedora#110).
 
+**The image must still ship `nvidia-smi`** (Arch: `nvidia-utils`, which
+`@github.com/opencharly/layer-nvidia` installs). CDI injects the driver LIBRARIES at runtime, not
+the CLI, and the free-VRAM gate execs `nvidia-smi` before it spawns the worker. An image without
+it answers `503 gpu_unavailable` — `nvidia-smi was not found, but QWEN3_TTS_DEVICE=cuda:0 requires
+an NVIDIA GPU` — on every synthesis request, with no worker ever started. The composing box
+composes that layer for exactly this reason; a new consumer must too.
+
 The composing image is `distro-cachyos/box/qwen3-tts`; its disposable bed
 `check-qwen3-tts-pod` is the live witness (lazy start, synthesis, gate refusal, idle release,
 reload).
