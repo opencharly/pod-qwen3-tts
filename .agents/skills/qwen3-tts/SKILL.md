@@ -177,9 +177,15 @@ curl -s http://127.0.0.1:${HOST_PORT}/health   # 200 ok, worker_pid, vram_free_m
 
 The baked `check:` steps run `tests/test_surface.py` (a stub worker drives lazy start,
 single-flight, the UDS proxy, the gate in both directions, the idle kill and the reload),
-`tests/test_common.py` (encoding/voice/readiness/state-machine contracts) and
+`tests/test_common.py` (encoding/voice/readiness/state-machine contracts),
 `tests/test_torch_free.py` (the shim imports neither torch nor `qwen_tts` — the guard that keeps
-the idle release total). They are build-scope, so `charly check box` runs them against the image.
+the idle release total) and `tests/test_nvml_gate.py` (the free-VRAM gate answers through NVML, and
+its diagnostic override refuses a non-numeric value). They are build-scope, so `charly check box`
+runs them against the image.
+
+**Every `tests/…` path below is relative to a checkout of THIS repo** — run it from the repo root.
+The published copy of this skill lives in the marketplace corpus, where no `tests/` tree sits beside
+it, so those commands are developer checks, not something to run from wherever you happen to be.
 
 The **real worker boundary** — the actual `qwen3-tts-worker.py` loading torch + the checkpoint,
 serving uvicorn over a Unix socket, writing the ready pipe, dying with its parent, and being killed
@@ -187,6 +193,7 @@ on idle — is proven by `tests/test_real_worker.py` on **CPU** with the candy's
 populated `HF_HOME`:
 
 ```bash
+# from the repo root — `tests/` ships with this repo, not with the corpus copy
 HF_HOME=~/.local/share/charly/models/huggingface \
   pixi run python tests/test_real_worker.py
 ```
