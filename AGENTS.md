@@ -9,6 +9,11 @@ Canonical files:
   `env_provide`, `port`, `volume`, `service`, `plan`) and its routing-only `skill:` node.
 - `qwen3-tts-server.py` — the charly-owned, torch-free FastAPI SHIM: validation, the bounded
   free-VRAM gate, the worker lifecycle (spawn, pipe readiness, idle kill) and the UDS proxy.
+- `box/qwen3-tts/charly.yml` — the `qwen3-tts` IMAGE on the CachyOS base, composing the LOCAL
+  `qwen3-tts` candy. Torch's cu130 wheels carry their own CUDA runtime and the driver arrives
+  through CDI, so no CUDA layer is composed.
+- `check-qwen3-tts-pod` (this repo's `charly.yml`) — the disposable R10 bed (health, voices, real
+  synthesis, idle unload) for that image. It lives HERE with the box it tests.
 - `qwen3-tts-worker.py` — the on-demand WORKER that imports torch + `qwen-tts`, loads the
   checkpoint and serves over a Unix socket. Killing it releases ALL VRAM, including the CUDA
   context; never move model work into the shim.
