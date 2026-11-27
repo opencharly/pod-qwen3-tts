@@ -1,0 +1,14 @@
+qwen3-tts:
+    candy:
+        # CachyOS base (operator direction), NOT fedora: torch's cu130 wheels carry their
+        # own CUDA runtime and the driver arrives through CDI at runtime, so no CUDA
+        # layer is needed — and the cachyos base is the distro this host runs.
+        base: cachyos.cachyos
+        platform:
+            - linux/amd64
+        candy:
+            # The candy THIS repo owns: the box proves the tree, not a pinned copy of itself.
+            - qwen3-tts
+        # No box-level check PLAN: the candy's own plan proves the server script and that
+        # the pixi environment imports torch/soundfile/qwen_tts. The composed IMAGE is
+        # proven by the disposable bed `check-qwen3-tts-pod` in this repo's charly.yml.

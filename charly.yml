@@ -1,3 +1,34 @@
+#  opencharly/pod-qwen3-tts — the Qwen3-TTS speech service: the candy at the
+#  repo root, its server/worker scripts, and now the `qwen3-tts` image box and its
+#  disposable R10 bed, which live HERE with the service they test (AGENTS.md
+#  "Repo classes and naming": a bed lives with the thing it tests).
+#
+#  A standalone consumer declares what a copy inside a distro inherited: the base
+#  as a NAMESPACED import at the project root (a namespace mounted by a discovered
+#  document does not resolve a box's own `base:`), and the pixi/aur builder
+#  vocabulary (a builder map does not cross a namespace boundary).
+defaults:
+    platform:
+        - linux/amd64
+    tag: auto
+    registry: ghcr.io/opencharly
+    build:
+        - pac
+    builder:
+        aur: arch.arch-builder
+        cargo: arch.arch-builder
+        npm: arch.arch-builder
+        pixi: arch.arch-builder
+    merge:
+        auto: false
+        max_mb: 128
+import:
+    - cachyos: '@github.com/opencharly/distro-cachyos:v2026.331.0132'
+    - arch: '@github.com/opencharly/distro-arch:v2026.330.1808'
+discover:
+    - path: box
+      recursive: true
+
 qwen3-tts:
     candy:
         description: |
@@ -169,3 +200,120 @@ qwen3-tts-skill:
         name: qwen3-tts
         family: qwen3-tts
         owner: qwen3-tts
+
+check-qwen3-tts-pod:
+    pod:
+        image: qwen3-tts
+        disposable: true
+        lifecycle: dev
+        # GPU-CDI pod on the REFCOUNTED axis: requires_shared, never requires_exclusive
+        # (measured on this venue — the exclusive axis attempts a vfio flip a live desktop
+        # compositor correctly refuses).
+        requires_shared: [nvidia-gpu]
+        # The checkpoint cache is the HOST Hugging Face cache shared with the live Qwen3-TTS
+        # deployment, so the checkpoint is downloaded once, not once per bed run.
+        volume:
+            - name: models
+              type: bind
+              host: ~/.local/share/charly/models/huggingface
+        env:
+            # A short TTL so the bed proves the unload/reload state machine, but long
+            # enough that the health probe's 5s poll can observe the loaded window
+            # after a cold start (the 5s TTL raced that probe in run 2026.324.1211).
+            # The operator deployment sets 300.
+            QWEN3_TTS_IDLE_UNLOAD_S: "30"
+        description: >-
+            Sole proof of the qwen3-tts image — the Qwen3-TTS speech service Open WebUI's `openai`
+            TTS engine calls, on the CachyOS base. Builds the image, deploys it as a pod, and runs
+            the candy's baked checks plus the deploy-scope probes: /health, the preset voice list,
+            a real synthesis returning RIFF audio with an audio/* content type, and the idle
+            unload (after the TTL the checkpoint is released and the next request reloads it).
+            The checkpoint downloads into the models volume on the first request, so the synthesis
+            probe is readiness-bounded (eventually, not a sleep). Needs the GPU venue; run on demand.
+        plan:
+            # AT REST the shim holds NO model: the worker is spawned on the first synthesis and
+            # killed after the idle TTL, so /health answers 503 with a machine-readable reason
+            # (status "unloaded") until a request loads it. This step used to demand 200 within
+            # 5m — the EAGER-loading contract of the shim this bed was written against — and
+            # measured 503 for the full window on the lazy one. Assert the REAL contract, both
+            # halves: unloaded at rest, ready once a request has started the worker.
+            - check: at rest the shim reports the UNLOADED state with its machine-readable reason (503, status "unloaded") — the lazy worker contract, never a false ready
+              id: qwen3-tts-health-unloaded
+              context:
+                - runtime
+              timeout: 20s
+              eventually: 5m
+              retry_interval: 5s
+              http:
+                http: http://127.0.0.1:${HOST_PORT:8000}/health
+                status: 503
+                body:
+                  - contains: '"status":"unloaded"'
+                  - contains: '"ready":false'
+            - check: the service publishes the preset voice list the consumer's picker reads
+              id: qwen3-tts-voices
+              context:
+                - runtime
+              timeout: 20s
+              eventually: 2m
+              retry_interval: 5s
+              http:
+                http: http://127.0.0.1:${HOST_PORT:8000}/v1/audio/voices
+                status: 200
+                body:
+                  - contains: vivian
+            - check: a synthesis request returns real RIFF audio bytes with an audio content type
+              id: qwen3-tts-synthesis
+              context:
+                - runtime
+              timeout: 15m
+              eventually: 15m
+              retry_interval: 20s
+              http:
+                http: http://127.0.0.1:${HOST_PORT:8000}/v1/audio/speech
+                method: POST
+                request_body: '{"input":"charly qwen3 tts bed","voice":"vivian"}'
+                status: 200
+                body:
+                  - contains: RIFF
+                header:
+                  - contains: audio/
+            - check: once a request has started the worker the health route reports READY (200, status "ok") — the second half of the lazy contract
+              id: qwen3-tts-health-ready
+              context:
+                - runtime
+              timeout: 20s
+              http:
+                http: http://127.0.0.1:${HOST_PORT:8000}/health
+                status: 200
+                body:
+                  - contains: '"status":"ok"'
+            - check: after the idle TTL the checkpoint is released, and the next request reloads it
+              id: qwen3-tts-idle-unload
+              context:
+                - runtime
+              timeout: 5m
+              command:
+                in_container: true
+                command: |
+                  set -eu
+                  base=http://127.0.0.1:8000
+                  # The synthesis step above used the model. The bed sets the product's idle
+                  # TTL to 30s; this loop POLLS the server's own /health state until the idle
+                  # unload fires, then asserts the unloaded state. The TTL is the mechanism
+                  # under test and the poll is bounded by the step timeout. (30s, not 5s: 5s
+                  # equalled the health probe interval, so the probe could miss the loaded
+                  # window; a TTL wider than the poll is a test-parameter choice, not a delay
+                  # masking a race.)
+                  for i in $(seq 1 150); do
+                    if curl -sS "$base/health" | grep -q '"loaded":false'; then break; fi
+                    sleep 1
+                  done
+                  curl -sS "$base/health" | grep -q '"status":"unloaded"'
+                  code=$(curl -sS -o /tmp/reload.wav -w '%{http_code}' -X POST \
+                    -H 'Content-Type: application/json' \
+                    --data '{"input":"reload after idle","voice":"vivian"}' \
+                    "$base/v1/audio/speech")
+                  test "$code" = 200
+                  head -c 4 /tmp/reload.wav | grep -q RIFF
+
